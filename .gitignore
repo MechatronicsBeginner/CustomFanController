@@ -1,0 +1,17 @@
+# Your machine's settings and logs - never publish these
+config.json
+config.simulate.json
+config.bad.json
+logs/
+
+# Build output
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+
+# Not redistributed here - see README "Requirements and setup"
+LpcACPIEC.bin
