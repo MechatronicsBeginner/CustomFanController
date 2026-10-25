@@ -205,3 +205,21 @@ class Policy:
         src = "GPU" if gpu_lvl > cpu_lvl else "CPU"
         return Decision(CURVE, level=level, reason=f"{src} curve", cpu_level=cpu_lvl,
                         gpu_level=gpu_lvl, hottest=hottest)
+
+
+def step_vertices(steps: list[tuple[int, int]], xmin: float, xmax: float, shift: float = 0.0) -> list[tuple[float, float]]:
+    """Corner points of a step curve as (temp, level), for drawing it.
+
+    `shift` moves every step to the left by that many degrees; with the
+    deadband as the shift this is the path the fan level follows when the
+    temperature FALLS (it steps down `deadband` degrees below where it stepped up).
+    """
+    pts: list[tuple[float, float]] = [(xmin, 0.0)]
+    prev = 0.0
+    for t, level in steps:
+        x = min(max(t - shift, xmin), xmax)
+        pts.append((x, prev))
+        pts.append((x, float(level)))
+        prev = float(level)
+    pts.append((xmax, prev))
+    return pts

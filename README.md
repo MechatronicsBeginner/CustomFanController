@@ -15,13 +15,13 @@ looks wrong.
 > | | |
 > |---|---|
 > | **Laptop** | Lenovo ThinkPad P1 Gen 6 (machine type 21FW) |
-> | **BIOS** | N3ZET57W (1.44), dated 26 Aug 2026 |
+> | **BIOS** | N3ZET57W (1.44), dated 27 Aug 2026 (as the Windows registry reports it) |
 > | **Fans** | 2 (both controlled and read back) |
 > | **OS** | Windows 11 Pro, build 26300 |
 > | **Driver** | [PawnIO](https://github.com/namazso/PawnIO) with the `LpcACPIEC` module (access limited to EC ports `0x62`/`0x66`) |
-> | **Version tested** | 1.3.0 |
+> | **Version tested** | 1.4.0. The window is new; the EC access layer is unchanged from 1.3.0. Run on this laptop under game load, overnight with several standby cycles, and through lid-close and sleep tests. See [Known limitations](#known-limitations-140). |
 >
-> **Verified on that machine:** reading both fans' level and RPM; setting levels
+> **Verified on that machine (1.3.0):** reading both fans' level and RPM; setting levels
 > 0–7 and handing back to EC auto, with read-back; sustained game load; start
 > at logon from a scheduled task; one sleep/wake cycle (fan register survived
 > it); running on battery; pausing while HWiNFO is open and resuming when it
@@ -76,8 +76,52 @@ built because the owner wanted sliders instead of editing curves in a file,
 both fans' RPM always on screen, a tray icon pinned to the taskbar, and
 fallback rules that could be read and tested.
 
+## Known limitations (1.4.0)
+
+These are things observed on one laptop. None of them is explained.
+
+- **Standby.** The program does not run while Windows is in Modern
+  Standby (lid close, Start > Sleep and screen-off timeouts all enter it).
+  In my tests, with the fans at a high level before standby, they kept
+  running through it, judged by ear (RPM was not logged). Each test lasted
+  one to two minutes, so I do not know how long they would hold that level.
+  **Exit the program from the tray before closing the lid or leaving the
+  laptop with a heavy load running.** Exiting hands both fans back to the
+  EC. Handing them back automatically when the display turns off is
+  planned, not built.
+- **After waking.** Once, fan 1 was found at level 0 when it should have
+  been 3, about 25 seconds after the first reading following a wake. The
+  program noticed on its next check and re-applied the level. I do not know
+  what changed it. Lenovo Vantage was running, but I did not isolate it.
+- **Occasional bad fan readings.** In one session, fan 2 twice reported
+  about 36,900 RPM at a valid level. The sanity check rejected both and the
+  next reading was normal. The cause is not known.
+- **Defaults.** The shipped defaults are hand-over at 92 °C, take back
+  at 85 °C and a 15 s step-down delay. I run 97/90/0 on my own laptop.
+- **Not tested:** other models or BIOS versions, and standby with the fans
+  running for longer than about two minutes.
+
 ## What it does
 
+- **A Task Manager style window** (dark, no gridlines, smooth graphs), with a
+  side bar:
+
+  | Page | What it shows |
+  |---|---|
+  | Overview | CPU, GPU, both fans and controller state with 5-minute sparklines; temperature and fan-speed history (5 min / 30 min / 2 h); time spent at each fan level; statistics |
+  | Fan curves | Each curve as a chart, with a marker for where the laptop is right now, the temperature the fans step *down* at, and the hand-over temperature. The sliders sit underneath and the chart follows them as you drag |
+  | Sensors | Every EC temperature sensor: now, lowest and highest since start, what it is used for, and whether it is ignored |
+  | Events | The program's log, filterable (all / changes / problems), with **Copy report** and **Open log folder** |
+  | Settings | Deadband, delay, hand-over and take-back temperatures, stall alarm, HWiNFO option |
+
+  The graphs are drawn slightly behind real time so the lines glide between
+  readings instead of stepping, and nothing extra is read from the EC to do
+  it. They only redraw while the window is on screen.
+- **Copy report** (Events page) puts a text report on the clipboard: program
+  version, laptop model and BIOS, whether the EC module matches the tested
+  one, your settings, current readings, a few statistics and the newest log
+  lines. Your user name is removed from paths. Read it before posting it in an
+  issue.
 - **Two curves.** A CPU curve (EC sensor `0x78`) and a GPU curve (`0x7B`).
   Both fans get whichever level is higher.
 - **Sliders** set the temperature at which each fan level engages. Fans step
@@ -197,8 +241,8 @@ The only EC registers this program ever **writes** are the fan selector
 Both fans are handed back to the EC (`0x80`) when any of these happen:
 
 - you pick EC Auto;
-- any monitored sensor reaches the hand-over temperature (set on the Behavior
-  & safety tab; control resumes at the lower "take back" temperature);
+- any monitored sensor reaches the hand-over temperature (set on the Settings
+  page; control resumes at the lower "take back" temperature);
 - the CPU sensor stops reporting;
 - 5 consecutive EC errors;
 - an unexpected error;
@@ -224,8 +268,7 @@ Other protections:
   level `0x90` / 37008 RPM). While HWiNFO is open, the app hands the fans to
   the EC, stops polling, and shows an orange "Paused" status. It resumes on
   its own when HWiNFO closes. If you turn off EC support in HWiNFO's
-  settings, tick "Keep running while HWiNFO is open" on the Behavior & safety
-  tab.
+  settings, tick "Keep running while HWiNFO is open" on the Settings page.
 - **Corrupted reads are rejected, not believed.** A fan reading above 8,000
   RPM counts as an EC error. A temperature that jumps more than 15 °C in one
   read is only accepted if the next read agrees.
@@ -236,6 +279,7 @@ Other protections:
 |---|---|
 | `CustomFanController.pyw` | Run as a script (testing) |
 | `requirements.txt` | Python packages (`pystray`, `pillow`) |
+| `customfan/` | The program. `service.py`/`control.py`/`thinkpad.py`/`ec.py`/`pawnio.py` talk to the hardware; `gui.py`, `pages.py`, `dashboard.py`, `widgets.py`, `theme.py` are the window; `history.py`, `events.py`, `report.py` hold the data behind it and have no Tk or hardware in them |
 | `build.ps1` | Builds `dist\CustomFanController\CustomFanController.exe` (daily use) |
 | `LpcACPIEC.bin` | **You supply this** (see Setup). Not in the repository |
 | `config.json` | Your settings. Created next to whichever you run, the .pyw or the .exe |

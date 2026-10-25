@@ -28,7 +28,7 @@ py -3 -m PyInstaller --noconfirm --clean --windowed --onedir `
     --name CustomFanController `
     --icon (Join-Path $root "assets\app.ico") `
     --version-file (Join-Path $root "assets\version_info.txt") `
-    --hidden-import pystray._win32 `
+    --hidden-import pystray._win32 --hidden-import PIL.ImageTk `
     --distpath (Join-Path $root "dist") --workpath $work --specpath $work `
     (Join-Path $root "CustomFanController.pyw")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }

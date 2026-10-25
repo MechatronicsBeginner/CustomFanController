@@ -234,7 +234,8 @@ class TestControlLoop(unittest.TestCase):
             loop.start()
             time.sleep(0.3)
             loop.stop()
-            rows = list(_csv.DictReader(path.open()))
+            with path.open() as fh:
+                rows = list(_csv.DictReader(fh))
             self.assertGreater(len(rows), 2)
             self.assertEqual(rows[-1]["cpu_c"], "60")
             self.assertEqual(rows[-1]["fan1_level"], "3")

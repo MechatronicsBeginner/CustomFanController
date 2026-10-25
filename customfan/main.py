@@ -112,7 +112,8 @@ def main(argv: list[str] | None = None) -> None:
             root.iconbitmap(default=str(icon_file))
         except tk.TclError:
             pass
-    App(root, loop, cfg, cfg_path, use_tray=True, start_hidden=not args.show, title_suffix=suffix)
+    App(root, loop, cfg, cfg_path, use_tray=True, start_hidden=not args.show, title_suffix=suffix,
+        history_csv=cycle_csv, log_path=logpath, module_path=None if args.simulate else APP_DIR / "LpcACPIEC.bin")
     try:
         root.mainloop()
     except KeyboardInterrupt:

@@ -16,13 +16,18 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from pathlib import Path
 
-from . import APP_NAME
+from . import APP_NAME, __version__
 from . import config as cfgmod
+from . import report as reportmod
+from . import theme as T
 from . import winutil
-from .control import StepCurve
+from .dashboard import Dashboard
+from .events import LogBuffer, read_tail
+from .history import History
+from .pages import CurvesPage, EventsPage, SensorsPage, SettingsPage
 from .service import (ControlLoop, Snapshot, ST_AUTO, ST_ERROR, ST_FAULT, ST_HANDOVER, ST_OK,
                       ST_PAUSED, ST_READONLY, ST_STARTING)
-from .thinkpad import SENSORS, describe_level
+from .widgets import NavBar
 
 log = logging.getLogger(__name__)
 
@@ -54,98 +59,44 @@ def make_icon_image(color: str):
     return img
 
 
-class CurveEditor(ttk.Frame):
-    """One row per step: level spinbox + temperature slider, kept in order."""
-
-    def __init__(self, master, title: str, sensor: str, on_change) -> None:
-        super().__init__(master, padding=10)
-        self.sensor = sensor
-        self.on_change = on_change
-        self.rows: list[tuple[tk.IntVar, tk.IntVar]] = []
-        self._building = False
-        ttk.Label(self, text=title, font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(self, text="Each row: the fan steps UP to this level as soon as the temperature reaches the slider value.",
-                  wraplength=520, foreground="#555").grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 6))
-        self.body = ttk.Frame(self)
-        self.body.grid(row=2, column=0, columnspan=3, sticky="ew")
-        self.summary = ttk.Label(self, text="", foreground="#333")
-        self.summary.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        self.columnconfigure(0, weight=1)
-
-    def load(self, steps: list[list[int]]) -> None:
-        self._building = True
-        for w in self.body.winfo_children():
-            w.destroy()
-        self.rows.clear()
-        for i, (temp, level) in enumerate(steps):
-            lv, tv = tk.IntVar(value=level), tk.IntVar(value=temp)
-            ttk.Label(self.body, text="Level").grid(row=i, column=0, padx=(0, 4))
-            sb = ttk.Spinbox(self.body, from_=0, to=7, width=3, textvariable=lv,
-                             command=lambda idx=i: self._leveled(idx), state="readonly")
-            sb.grid(row=i, column=1)
-            ttk.Label(self.body, text="at").grid(row=i, column=2, padx=4)
-            sc = tk.Scale(self.body, from_=cfgmod.TEMP_RANGE[0], to=cfgmod.TEMP_RANGE[1], orient="horizontal",
-                          resolution=1, length=330, variable=tv, showvalue=True,
-                          command=lambda _v, idx=i: self._slid(idx))
-            sc.grid(row=i, column=3, sticky="ew")
-            ttk.Label(self.body, text="°C").grid(row=i, column=4, padx=(2, 0))
-            self.rows.append((lv, tv))
-        self.body.columnconfigure(3, weight=1)
-        self._building = False
-
-    def _slid(self, idx: int) -> None:
-        if self._building:
-            return
-        # keep thresholds strictly increasing: clamp between neighbours
-        lo = self.rows[idx - 1][1].get() + 1 if idx > 0 else cfgmod.TEMP_RANGE[0]
-        hi = self.rows[idx + 1][1].get() - 1 if idx + 1 < len(self.rows) else cfgmod.TEMP_RANGE[1]
-        v = self.rows[idx][1].get()
-        if v < lo or v > hi:
-            self.rows[idx][1].set(max(lo, min(hi, v)))
-        self._changed()
-
-    def _leveled(self, idx: int) -> None:
-        # levels may not go down as temperature goes up: clamp between neighbours
-        lo = self.rows[idx - 1][0].get() if idx > 0 else 0
-        hi = self.rows[idx + 1][0].get() if idx + 1 < len(self.rows) else 7
-        v = self.rows[idx][0].get()
-        if v < lo or v > hi:
-            self.rows[idx][0].set(max(lo, min(hi, v)))
-        self._changed()
-
-    def _changed(self) -> None:
-        if not self._building:
-            self.on_change()
-
-    def steps(self) -> list[list[int]]:
-        return [[tv.get(), lv.get()] for lv, tv in self.rows]
-
-    def update_summary(self, deadband: int, current: int | None) -> None:
-        st = self.steps()
-        first = st[0][0] if st else 0
-        txt = f"Fan off below {first - deadband}°C (first step {first}°C minus {deadband}°C deadband)."
-        if current is not None:
-            txt += f"   Now: {self.sensor} {current}°C → level {StepCurve.preview([tuple(s) for s in st], current)}"
-        self.summary.configure(text=txt)
-
-
 class App:
     def __init__(self, root: tk.Tk, loop: ControlLoop, cfg: dict, cfg_path: Path, *,
-                 use_tray: bool, start_hidden: bool, title_suffix: str = "") -> None:
+                 use_tray: bool, start_hidden: bool, title_suffix: str = "",
+                 history_csv: Path | None = None, log_path: Path | None = None,
+                 module_path: Path | None = None) -> None:
         self.root = root
         self.loop = loop
         self.cfg = copy.deepcopy(cfg)
         self.cfg_path = cfg_path
+        self.module_path = module_path
+        self.run_mode = title_suffix.strip(" []").lower() or "normal"
         self.ui_queue: "queue.Queue[str]" = queue.Queue()
         self.icon = None
         self._icon_state = None
         self._exiting = False
+        self._failed_pages: set[str] = set()
+        self.page_key = "overview"
+
+        T.init_scaling(root)
+        T.apply_dark_theme(root)
+        self.history = History()
+        if history_csv is not None:
+            log.info("Dashboard history: %d earlier samples loaded", self.history.prefill_csv(history_csv))
+        self.log_buffer = LogBuffer()
+        if log_path is not None:
+            self.log_buffer.prefill(read_tail(log_path))
+        logging.getLogger().addHandler(self.log_buffer)         # from here on, new log lines reach the Events page
 
         root.title(APP_NAME + title_suffix)
-        root.minsize(680, 660)
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w, h = min(T.px(1140), sw - 80), min(T.px(860), sh - 120)          # never bigger than the screen
+        root.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+        root.minsize(min(T.px(980), sw - 80), min(T.px(680), sh - 120))
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self._build()
+        self._build(log_path.parent if log_path is not None else None)
+        T.enable_dark_titlebar(root)
         self.load_settings_into_ui(self.cfg)
+        self._navigate("overview")
 
         if use_tray:
             self._start_tray()
@@ -155,19 +106,31 @@ class App:
         self.root.after(300, self._poll)
 
     # ------------------------------------------------------------- layout
-    def _build(self) -> None:
+    def _build(self, log_dir: Path | None) -> None:
         r = self.root
-        top = ttk.Frame(r, padding=(12, 10, 12, 4))
-        top.pack(fill="x")
-        self.dot = tk.Canvas(top, width=18, height=18, highlightthickness=0)
-        self.dot_id = self.dot.create_oval(2, 2, 16, 16, fill=STATUS_COLORS[ST_STARTING], outline="")
-        self.dot.grid(row=0, column=0, rowspan=2, padx=(0, 8))
-        self.status_lbl = ttk.Label(top, text="Starting", font=("Segoe UI", 11, "bold"))
+        r.columnconfigure(1, weight=1)
+        r.rowconfigure(0, weight=1)
+        self.nav = NavBar(r, [("overview", "Overview", "overview"), ("curves", "Fan curves", "curves"),
+                              ("sensors", "Sensors", "sensors"), ("events", "Events", "events")],
+                          [("settings", "Settings", "settings")], self._navigate)
+        self.nav.grid(row=0, column=0, sticky="ns")
+
+        main = tk.Frame(r, bg=T.BG)
+        main.grid(row=0, column=1, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(main, padding=(T.px(16), T.px(12), T.px(16), T.px(4)))
+        top.grid(row=0, column=0, sticky="ew")
+        self.dot = tk.Canvas(top, width=T.px(18), height=T.px(18), highlightthickness=0)
+        self.dot_id = self.dot.create_oval(T.px(2), T.px(2), T.px(16), T.px(16), fill=STATUS_COLORS[ST_STARTING],
+                                           outline="")
+        self.dot.grid(row=0, column=0, rowspan=2, padx=(0, 10))
+        self.status_lbl = ttk.Label(top, text="Starting", font=T.font(12, True))
         self.status_lbl.grid(row=0, column=1, sticky="w")
-        self.msg_lbl = ttk.Label(top, text="", foreground="#444")
+        self.msg_lbl = ttk.Label(top, text="", foreground=T.TEXT2)
         self.msg_lbl.grid(row=1, column=1, sticky="w")
         top.columnconfigure(1, weight=1)
-
         modef = ttk.Frame(top)
         modef.grid(row=0, column=2, rowspan=2, sticky="e")
         self.mode_var = tk.StringVar(value=self.cfg["mode"])
@@ -176,126 +139,57 @@ class App:
         ttk.Radiobutton(modef, text="EC Auto (BIOS)", value="auto", variable=self.mode_var,
                         command=self._mode_clicked).pack(side="left", padx=4)
 
-        live = ttk.LabelFrame(r, text="Now", padding=(12, 6))
-        live.pack(fill="x", padx=12, pady=6)
-        self.live: dict[str, ttk.Label] = {}
-        rows = [("cpu", "CPU"), ("gpu", "GPU"), ("hot", "Hottest monitored"),
-                ("fan1", "Fan 1"), ("fan2", "Fan 2")]
-        for i, (key, label) in enumerate(rows):
-            ttk.Label(live, text=label + ":").grid(row=i, column=0, sticky="w", padx=(0, 10))
-            lbl = ttk.Label(live, text="-", font=("Segoe UI", 10))
-            lbl.grid(row=i, column=1, sticky="w")
-            self.live[key] = lbl
+        host = tk.Frame(main, bg=T.BG)
+        host.grid(row=1, column=0, sticky="nsew", padx=T.px(16), pady=(T.px(6), T.px(8)))
+        host.columnconfigure(0, weight=1)
+        host.rowconfigure(0, weight=1)
+        about = (f"{APP_NAME} {__version__}\nTested on one laptop: ThinkPad P1 Gen 6. See the README before "
+                 f"trusting it on anything else.\nSettings are saved next to the program (config.json).")
+        self.settings = SettingsPage(host, self._dirty, about)
+        self.curves = CurvesPage(host, self._dirty, self.settings.params)
+        self.sensors = SensorsPage(host, self.history, self._dirty)
+        self.events = EventsPage(host, self.log_buffer, log_dir, self._make_report)
+        self.dashboard = Dashboard(host, self.history)
+        self.pages = {"overview": self.dashboard, "curves": self.curves, "sensors": self.sensors,
+                      "events": self.events, "settings": self.settings}
+        for page in self.pages.values():
+            page.grid(row=0, column=0, sticky="nsew")
+            page.grid_remove()
 
-        nb = ttk.Notebook(r)
-        nb.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        self.cpu_ed = CurveEditor(nb, "CPU curve (EC sensor 0x78)", "CPU", self._dirty)
-        self.gpu_ed = CurveEditor(nb, "GPU curve (EC sensor 0x7B)", "GPU", self._dirty)
-        nb.add(self.cpu_ed, text="CPU curve")
-        nb.add(self.gpu_ed, text="GPU curve")
-        nb.add(self._build_behavior(nb), text="Behavior & safety")
-        nb.add(self._build_sensors(nb), text="Sensors")
+        # shown only while there are unsaved changes (grid row 2 shrinks to nothing otherwise)
+        self.bar = tk.Frame(main, bg=T.SURFACE, padx=T.px(16), pady=T.px(8))
+        self.bar.grid(row=2, column=0, sticky="ew")
+        tk.Label(self.bar, text="You have unsaved changes", bg=T.SURFACE, fg=T.WARN, font=T.font(10)).pack(side="left")
+        ttk.Button(self.bar, text="Revert", command=self._revert).pack(side="right")
+        ttk.Button(self.bar, text="Apply & save", style="Accent.TButton", command=self._apply).pack(side="right", padx=8)
+        self.bar.grid_remove()
 
-        bottom = ttk.Frame(r, padding=(12, 0, 12, 10))
-        bottom.pack(fill="x")
-        ttk.Label(bottom, text="Both fans always get the higher of the two curves' levels.",
-                  foreground="#555").pack(side="left")
-        self.dirty_lbl = ttk.Label(bottom, text="", foreground="#b45309")
-        self.dirty_lbl.pack(side="left", padx=10)
-        ttk.Button(bottom, text="Revert", command=self._revert).pack(side="right")
-        ttk.Button(bottom, text="Apply & save", command=self._apply).pack(side="right", padx=6)
-
-    def _slider(self, parent, row, label, var, lo, hi, hint):
-        r = row * 2
-        ttk.Label(parent, text=label).grid(row=r, column=0, sticky="sw", pady=(6, 0))
-        tk.Scale(parent, from_=lo, to=hi, orient="horizontal", resolution=1, length=300, variable=var,
-                 command=lambda _v: self._dirty()).grid(row=r, column=1, sticky="w", padx=8)
-        ttk.Label(parent, text=hint, foreground="#555", wraplength=560).grid(
-            row=r + 1, column=0, columnspan=2, sticky="w", pady=(0, 4))
-
-    def _build_behavior(self, nb) -> ttk.Frame:
-        f = ttk.Frame(nb, padding=10)
-        self.v_deadband = tk.IntVar()
-        self.v_delay = tk.IntVar()
-        self.v_handover = tk.IntVar()
-        self.v_resume = tk.IntVar()
-        self.v_cycle = tk.IntVar()
-        self.v_stall = tk.IntVar()
-        L = cfgmod.LIMITS
-        self._slider(f, 0, "Step-down deadband (°C)", self.v_deadband, *L["deadband_c"],
-                     "Fans step up immediately, but only step down once the temperature is this far below the step. Stops hunting.")
-        self._slider(f, 1, "Step-down delay (s)", self.v_delay, *L["step_down_delay_s"],
-                     "Before stepping down, the temperature must stay below the deadband this long without "
-                     "interruption. Rides out short dips (loading screens, a bad read) instead of cycling.")
-        self._slider(f, 2, "Hand to EC at (°C)", self.v_handover, *L["handover_c"],
-                     "If any monitored sensor reaches this, the EC's own curve takes over both fans.")
-        self._slider(f, 3, "Take back control at (°C)", self.v_resume, *L["resume_c"],
-                     "Your curve resumes once everything is back below this.")
-        self._slider(f, 4, "Update every (s)", self.v_cycle, *L["cycle_s"],
-                     "How often temperatures are read. 2-5 s is plenty; faster only adds EC traffic.")
-        self._slider(f, 5, "Fan-stall alarm after (s)", self.v_stall, *L["stall_check_s"],
-                     "Red alarm if a fan is commanded on but reads 0 RPM for this long.")
-        self.v_allow_hwinfo = tk.BooleanVar()
-        ttk.Checkbutton(f, text="Keep running while HWiNFO is open", variable=self.v_allow_hwinfo,
-                        command=self._dirty).grid(row=12, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Label(f, text="Only tick this after turning off EC support in HWiNFO's settings. Otherwise "
-                          "HWiNFO's EC reads collide with this app's and corrupt both, so by default the app "
-                          "hands the fans to the EC and pauses while HWiNFO runs.",
-                  foreground="#555", wraplength=560).grid(row=13, column=0, columnspan=2, sticky="w")
-        return f
-
-    def _build_sensors(self, nb) -> ttk.Frame:
-        f = ttk.Frame(nb, padding=10)
-        ttk.Label(f, text="Ignored sensors aren't read at all (less EC traffic) and don't count toward "
-                          "the safety hand-over. CPU and GPU are always used.", foreground="#555", wraplength=560).grid(
-            row=0, column=0, columnspan=5, sticky="w", pady=(0, 6))
-        for c, h in enumerate(("Sensor", "Register", "Raw", "Used value", "Ignore")):
-            ttk.Label(f, text=h, font=("Segoe UI", 9, "bold")).grid(row=1, column=c, sticky="w", padx=6)
-        self.sensor_rows: dict[str, tuple[ttk.Label, ttk.Label, tk.BooleanVar]] = {}
-        for i, (reg, name) in enumerate(SENSORS, start=2):
-            ttk.Label(f, text=name).grid(row=i, column=0, sticky="w", padx=6)
-            ttk.Label(f, text=f"0x{reg:02X}").grid(row=i, column=1, sticky="w", padx=6)
-            raw = ttk.Label(f, text="-")
-            raw.grid(row=i, column=2, sticky="w", padx=6)
-            used = ttk.Label(f, text="-")
-            used.grid(row=i, column=3, sticky="w", padx=6)
-            var = tk.BooleanVar()
-            cb = ttk.Checkbutton(f, variable=var, command=self._dirty)
-            if name in cfgmod.PROTECTED_SENSORS:
-                cb.state(["disabled"])
-            cb.grid(row=i, column=4, padx=6)
-            self.sensor_rows[name] = (raw, used, var)
-        return f
+    def _navigate(self, key: str) -> None:
+        self.page_key = key
+        for k, page in self.pages.items():
+            if k == key:
+                page.grid()
+            else:
+                page.grid_remove()
+        self.nav.select(key)
+        self._update_page(self.loop.snapshot())
 
     # ----------------------------------------------------- settings <-> UI
     def load_settings_into_ui(self, cfg: dict) -> None:
-        self.cpu_ed.load(cfg["cpu_curve"])
-        self.gpu_ed.load(cfg["gpu_curve"])
-        self.v_deadband.set(cfg["deadband_c"])
-        self.v_delay.set(cfg["step_down_delay_s"])
-        self.v_handover.set(cfg["handover_c"])
-        self.v_resume.set(cfg["resume_c"])
-        self.v_cycle.set(cfg["cycle_s"])
-        self.v_stall.set(cfg["stall_check_s"])
-        self.v_allow_hwinfo.set(cfg["allow_hwinfo"])
-        for name, (_r, _u, var) in self.sensor_rows.items():
-            var.set(name in cfg["ignore_sensors"])
+        for page in (self.settings, self.curves, self.sensors):
+            page.load(cfg)
         self.mode_var.set(cfg["mode"])
-        self.dirty_lbl.configure(text="")
+        self.bar.grid_remove()
 
     def settings_from_ui(self) -> dict:
         cfg = copy.deepcopy(self.cfg)
-        cfg.update(cpu_curve=self.cpu_ed.steps(), gpu_curve=self.gpu_ed.steps(),
-                   deadband_c=self.v_deadband.get(), step_down_delay_s=self.v_delay.get(),
-                   handover_c=self.v_handover.get(),
-                   resume_c=self.v_resume.get(), cycle_s=self.v_cycle.get(),
-                   stall_check_s=self.v_stall.get(), mode=self.mode_var.get(),
-                   allow_hwinfo=self.v_allow_hwinfo.get(),
-                   ignore_sensors=[n for n, (_r, _u, v) in self.sensor_rows.items() if v.get()])
+        for page in (self.settings, self.curves, self.sensors):
+            page.collect(cfg)
+        cfg["mode"] = self.mode_var.get()
         return cfg
 
     def _dirty(self) -> None:
-        self.dirty_lbl.configure(text="Unsaved changes")
+        self.bar.grid()
 
     def _apply(self) -> None:
         wanted = self.settings_from_ui()
@@ -331,6 +225,19 @@ class App:
             log.exception("could not save mode")
         if self.icon is not None:
             self.icon.update_menu()
+
+    # ------------------------------------------------------------- report
+    def _make_report(self) -> str:
+        h, now, window = self.history, time.time(), 1800
+        stats = {"window": "30 min", "peak": h.peak(window, now), "changes_per_hour": h.changes_per_hour(window, now),
+                 "handovers": h.status_entries(["handover"], window, now),
+                 "pauses": h.status_entries(["paused"], window, now)}
+        ranges = {name: (lo, hi) for name, (lo, hi) in h.sensor_stats.items()}
+        return reportmod.build_report(
+            version=__version__, frozen=bool(getattr(sys, "frozen", False)), machine=reportmod.machine_info(),
+            module_sha=reportmod.sha256_file(self.module_path) if self.module_path else None, cfg=self.cfg,
+            snap=self.loop.snapshot(), stats=stats, sensor_ranges=ranges, entries=self.log_buffer.snapshot(),
+            run_mode=self.run_mode)
 
     # --------------------------------------------------------------- tray
     def _start_tray(self) -> None:
@@ -424,6 +331,16 @@ class App:
         if not self._exiting:
             self.root.after(500, self._poll)
 
+    def _update_page(self, s: Snapshot) -> None:
+        """Feed the visible page. A drawing bug must never break status or tray updates."""
+        key = self.page_key
+        try:
+            self.pages[key].update_view(s, self.loop.cfg)
+        except Exception:
+            if key not in self._failed_pages:
+                self._failed_pages.add(key)
+                log.exception("Updating the %s page failed (further errors on this page suppressed)", key)
+
     def _render(self, s: Snapshot) -> None:
         stale_after = 3 * float(self.loop.cfg["cycle_s"]) + 8
         status = s.status
@@ -441,29 +358,13 @@ class App:
         def fmt_t(name):
             v = t.get(name)
             return "-" if v is None else f"{v}°C"
-        self.live["cpu"].configure(text=f"{fmt_t('CPU')}   (curve asks for level {s.cpu_level})")
-        self.live["gpu"].configure(text=f"{fmt_t('GPU')}   (curve asks for level {s.gpu_level})")
-        self.live["hot"].configure(text=f"{s.hottest[0]} {s.hottest[1]}°C" if s.hottest else "-")
         fans = {f.fan: f for f in s.fans}
-        for n in (1, 2):
-            f = fans.get(n)
-            warn = "   ⚠ not spinning" if n in s.stalled else ""
-            self.live[f"fan{n}"].configure(
-                text="-" if f is None else f"level {describe_level(f.level)}   ·   {f.rpm} RPM{warn}")
-
-        for name, (raw_lbl, used_lbl, _v) in self.sensor_rows.items():
-            raw = (s.raw or {}).get(name)
-            used = t.get(name)
-            if raw is None and s.raw and name in self.cfg["ignore_sensors"]:
-                raw_lbl.configure(text="not read (ignored)")
-                used_lbl.configure(text="-")
-                continue
-            raw_lbl.configure(text="-" if raw is None else (f"0x{raw:02X} (no data)" if raw in (0, 0x80) or raw > 0x80 else f"{raw}"))
-            used_lbl.configure(text="-" if used is None else f"{used}°C")
-
-        db = self.v_deadband.get()
-        self.cpu_ed.update_summary(db, t.get("CPU"))
-        self.gpu_ed.update_summary(db, t.get("GPU"))
+        try:
+            self.history.add_snapshot(s)
+        except Exception:
+            log.exception("history update failed")
+        if self.root.winfo_viewable():
+            self._update_page(s)
 
         f1, f2 = fans.get(1), fans.get(2)
         tip = (f"{STATUS_TITLES.get(status, status)}\n"
@@ -474,6 +375,7 @@ class App:
     # ------------------------------------------------------------- window
     def show(self) -> None:
         self.root.deiconify()
+        T.enable_dark_titlebar(self.root)
         self.root.lift()
         self.root.focus_force()
 
