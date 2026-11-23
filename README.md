@@ -19,7 +19,7 @@ looks wrong.
 > | **Fans** | 2 (both controlled and read back) |
 > | **OS** | Windows 11 Pro, build 26300 |
 > | **Driver** | [PawnIO](https://github.com/namazso/PawnIO) with the `LpcACPIEC` module (access limited to EC ports `0x62`/`0x66`) |
-> | **Version tested** | 1.5.0. The EC access layer is unchanged from 1.3.0. 1.4.0 added the window; 1.4.1 added the kill-safety watchdog and fixed tray-icon pinning for a new install folder; 1.5.0 hands the fans to the EC while on battery. 1.4.x ran on this laptop under game load, overnight with several standby cycles, through lid-close and sleep tests, and in daily use for about four weeks. 1.5.0's battery mode was tested on the laptop as a script, not yet as the built exe. See [Known limitations](#known-limitations-150). |
+> | **Version tested** | 1.5.0. The EC access layer is unchanged from 1.3.0. 1.4.0 added the window; 1.4.1 added the kill-safety watchdog and fixed tray-icon pinning for a new install folder; 1.5.0 hands the fans to the EC while on battery. 1.4.x ran on this laptop under game load, overnight with several standby cycles, through lid-close and sleep tests, and in daily use for about four weeks. 1.5.0's battery mode was tested on the laptop as a script and as the built exe. See [Known limitations](#known-limitations-150). |
 >
 > **Verified on that machine (1.3.0):** reading both fans' level and RPM; setting levels
 > 0–7 and handing back to EC auto, with read-back; sustained game load; start
@@ -35,8 +35,8 @@ looks wrong.
 > first-run pin was not verified on hardware: the log from that start no
 > longer exists.
 >
-> **Verified on that machine (1.5.0, run as a script, confirmed in the logs
-> and the Windows event log):** unplugging with the fans at level 5 handed
+> **Verified on that machine (1.5.0, run as a script unless marked, confirmed
+> in the logs and the Windows event log):** unplugging with the fans at level 5 handed
 > both to EC auto within half a second; closing the lid on battery entered
 > Modern Standby with the EC already in control (3 min 44 s, no manual
 > level held); plugging back in brought the curve back within a cycle;
@@ -45,8 +45,9 @@ looks wrong.
 > unticking the battery option on battery and clicking Apply brought the
 > curve back without a restart, and ticking it again handed the fans back
 > to EC auto (on the built exe);
-> the saved Fan curve choice was never changed. Not yet tested: the built
-> exe, and a reboot on battery through the scheduled task.
+> after a reboot on battery, the scheduled task started the program in EC
+> auto (on the built exe);
+> the saved Fan curve choice was never changed.
 >
 > **Not tested:** any other model or generation, single-fan ThinkPads, Windows
 > 10, hibernate, docking, uptimes of weeks, any BIOS other than the one used
