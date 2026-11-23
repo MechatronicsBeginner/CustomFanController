@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from customfan import config as cfgmod                                   # noqa: E402
 from customfan.control import AUTO, CURVE, Policy, SensorFilter, StepCurve  # noqa: E402
 from customfan.ec import ECError, EmbeddedController                      # noqa: E402
-from customfan.service import (ControlLoop, ST_AUTO, ST_FAULT, ST_HANDOVER,  # noqa: E402
+from customfan.service import (ControlLoop, ST_AUTO, ST_BATTERY, ST_FAULT, ST_HANDOVER,  # noqa: E402
                            ST_OK, ST_PAUSED, ST_READONLY)
 from customfan.simulator import SimulatedEC                               # noqa: E402
 from customfan.thinkpad import LEVEL_AUTO, ThinkPadFans                   # noqa: E402
@@ -197,13 +197,13 @@ class TestConfig(unittest.TestCase):
 
 
 class TestControlLoop(unittest.TestCase):
-    def run_loop(self, sim, cycles=4, readonly=False, conflict_check=None, **cfg_over):
+    def run_loop(self, sim, cycles=4, readonly=False, conflict_check=None, power_check=None, **cfg_over):
         cfg, _ = cfgmod.validate({})
         cfg.update(cfg_over)
         snaps = []
         loop = ControlLoop(lambda: sim, cfg, readonly=readonly, cycle_override_s=0.02, ec_wait_timeout_s=0.02,
                            on_snapshot=snaps.append, conflict_check=conflict_check,
-                           conflict_interval_s=0.0)
+                           conflict_interval_s=0.0, power_check=power_check)
         loop.start()
         deadline = time.time() + 5
         while len([s for s in snaps if s.fans]) < cycles and time.time() < deadline:
@@ -352,6 +352,132 @@ class TestControlLoop(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual(sim.fan_level, {0: 6, 1: 6})
         loop.stop()
+
+
+class TestBattery(unittest.TestCase):
+    """On battery (with battery_ec_auto) the EC runs the fans. The saved choice
+    (cfg["mode"]) is never changed by it, so the curve comes back on AC."""
+    run_loop = TestControlLoop.run_loop
+
+    def wait_for(self, loop, status, timeout=3.0):
+        deadline = time.time() + timeout
+        while loop.snapshot().status != status and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(loop.snapshot().status, status)
+
+    def battery_loop(self, on_battery=True, **kw):
+        power = {"battery": on_battery}
+        sim = SimulatedEC(thermal=False)
+        sim.set_cpu(60)                                        # the curve would want level 3
+        loop, snaps = self.run_loop(sim, power_check=lambda: power["battery"], **kw)
+        self.addCleanup(loop.stop)
+        return sim, loop, snaps, power
+
+    def test_unplug_hands_to_ec_and_plug_in_resumes_curve(self):
+        sim, loop, _, power = self.battery_loop(on_battery=False)
+        self.wait_for(loop, ST_OK)
+        self.assertEqual(sim.fan_level, {0: 3, 1: 3})
+        with self.assertLogs("customfan.service", "INFO") as cm:
+            power["battery"] = True
+            self.wait_for(loop, ST_BATTERY)
+            self.assertEqual(sim.fan_level, {0: LEVEL_AUTO, 1: LEVEL_AUTO})
+            self.assertFalse(loop._manual, "watchdog would still think the fans are manual")
+            power["battery"] = False
+            self.wait_for(loop, ST_OK)
+        self.assertEqual(sim.fan_level, {0: 3, 1: 3})
+        self.assertTrue(any("On battery - fans to EC auto" in m for m in cm.output))
+        self.assertTrue(any("On AC power - back to your fan curve" in m for m in cm.output))
+
+    def test_battery_never_changes_the_saved_choice(self):
+        sim, loop, snaps, power = self.battery_loop()
+        self.wait_for(loop, ST_BATTERY)
+        time.sleep(0.1)
+        self.assertEqual(loop.cfg["mode"], "curve")
+        self.assertTrue(all(s.mode == "curve" for s in snaps), "a snapshot reported mode auto")
+
+    def test_starts_on_battery_in_ec_auto_without_a_manual_write(self):
+        sim, loop, snaps, power = self.battery_loop()
+        first = next(s for s in snaps if s.fans)
+        self.assertEqual(first.status, ST_BATTERY)
+        self.assertFalse([w for w in sim.writes if w[0] == 0x2F and w[1] != LEVEL_AUTO],
+                         "a manual level was written while on battery")
+
+    def test_tray_pick_on_battery_stays_overridden_until_ac(self):
+        # Decision (a): battery stays in charge while the box is ticked.
+        sim, loop, _, power = self.battery_loop()
+        self.wait_for(loop, ST_BATTERY)
+        loop.set_mode("auto")
+        loop.set_mode("curve")                                 # the user picks the curve, e.g. for a game
+        time.sleep(0.15)
+        self.assertEqual(loop.snapshot().status, ST_BATTERY)
+        self.assertEqual(sim.fan_level, {0: LEVEL_AUTO, 1: LEVEL_AUTO})
+        power["battery"] = False
+        self.wait_for(loop, ST_OK)
+        self.assertEqual(sim.fan_level, {0: 3, 1: 3})
+
+    def test_tray_auto_pick_on_battery_is_kept_after_plugging_in(self):
+        sim, loop, _, power = self.battery_loop()
+        self.wait_for(loop, ST_BATTERY)
+        loop.set_mode("auto")
+        self.wait_for(loop, ST_AUTO)                           # their own choice now, not battery
+        power["battery"] = False
+        time.sleep(0.15)
+        self.assertEqual(loop.snapshot().status, ST_AUTO)
+        self.assertEqual(sim.fan_level, {0: LEVEL_AUTO, 1: LEVEL_AUTO})
+
+    def test_unticking_the_setting_brings_the_curve_back_live(self):
+        sim, loop, _, power = self.battery_loop()
+        self.wait_for(loop, ST_BATTERY)
+        loop.apply_config(dict(loop.cfg, battery_ec_auto=False))
+        self.wait_for(loop, ST_OK)
+        self.assertEqual(sim.fan_level, {0: 3, 1: 3})
+        loop.apply_config(dict(loop.cfg, battery_ec_auto=True))   # and ticking it again
+        self.wait_for(loop, ST_BATTERY)
+        self.assertEqual(sim.fan_level, {0: LEVEL_AUTO, 1: LEVEL_AUTO})
+
+    def test_setting_off_means_curve_on_battery(self):
+        sim, loop, _, power = self.battery_loop(battery_ec_auto=False)
+        self.wait_for(loop, ST_OK)
+        self.assertEqual(sim.fan_level, {0: 3, 1: 3})
+
+    def test_unknown_or_failing_power_check_counts_as_ac(self):
+        for check in (lambda: None, lambda: 1 / 0):
+            sim = SimulatedEC(thermal=False)
+            sim.set_cpu(60)
+            loop, _ = self.run_loop(sim, power_check=check)
+            self.wait_for(loop, ST_OK)
+            self.assertEqual(sim.fan_level, {0: 3, 1: 3})
+            loop.stop()
+
+    def test_readonly_on_battery_never_writes(self):
+        sim, loop, _, power = self.battery_loop(readonly=True)
+        self.wait_for(loop, ST_READONLY)
+        self.assertIn("on battery", loop.snapshot().message)
+        self.assertFalse([w for w in sim.writes if w[0] == 0x2F])
+
+    def test_hot_on_battery_stays_ec_auto(self):
+        sim, loop, _, power = self.battery_loop()
+        sim.set_cpu(95)
+        time.sleep(0.15)
+        self.assertEqual(loop.snapshot().status, ST_BATTERY)
+        self.assertEqual(sim.fan_level, {0: LEVEL_AUTO, 1: LEVEL_AUTO})
+
+
+class TestBatteryConfig(unittest.TestCase):
+    def test_default_on_and_strict_bool(self):
+        self.assertIs(cfgmod.DEFAULTS["battery_ec_auto"], True)
+        cfg, problems = cfgmod.validate({"battery_ec_auto": False})
+        self.assertIs(cfg["battery_ec_auto"], False)
+        self.assertFalse(problems)
+        cfg, problems = cfgmod.validate({"battery_ec_auto": "false"})   # a hand edit with quotes
+        self.assertIs(cfg["battery_ec_auto"], True)
+        self.assertTrue(problems)
+
+    def test_battery_lines_show_under_changes(self):
+        from customfan.events import CHANGE_PREFIXES
+        for text in ("On battery - fans to EC auto (your choice resumes on AC power)",
+                     "On AC power - back to your fan curve", "Battery setting turned off - back to your fan curve"):
+            self.assertTrue(text.startswith(CHANGE_PREFIXES), text)
 
 
 if __name__ == "__main__":

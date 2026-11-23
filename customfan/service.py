@@ -6,6 +6,9 @@ select-then-write sequences can never interleave with each other.
 
 Failsafes (each one hands both fans back to the EC with 0x80):
   * user picks "EC Auto"
+  * on battery, if "battery_ec_auto" is set. This is worked out every cycle
+    and never written into cfg["mode"], so the saved choice is untouched and
+    the curve comes back on AC (or when the setting is turned off)
   * hottest monitored sensor >= handover temp (resumes at resume temp)
   * CPU sensor stops reporting
   * N consecutive EC errors (retries every cycle, resumes when reads recover)
@@ -45,6 +48,7 @@ log = logging.getLogger(__name__)
 ST_STARTING = "starting"
 ST_OK = "ok"            # curve in control
 ST_AUTO = "auto"        # EC Auto chosen by the user
+ST_BATTERY = "battery"  # on battery with battery_ec_auto: EC in control, the user's choice resumes on AC
 ST_HANDOVER = "handover"  # hot / sensor issue: EC temporarily in control
 ST_PAUSED = "paused"    # another program is using the EC: fans on EC auto, no polling
 ST_READONLY = "readonly"
@@ -111,7 +115,8 @@ class ControlLoop(threading.Thread):
                  conflict_check: Callable[[], list] | None = None,
                  conflict_interval_s: float = 10.0, cycle_log: CycleLog | None = None,
                  lease: LeaseWriter | None = None, watchdog_check: Callable[[], bool] | None = None,
-                 watchdog_interval_s: float = 10.0) -> None:
+                 watchdog_interval_s: float = 10.0,
+                 power_check: Callable[[], Optional[bool]] | None = None) -> None:
         super().__init__(name="fan-control", daemon=True)
         self._open_io = open_io
         self.cfg = cfg
@@ -145,6 +150,9 @@ class ControlLoop(threading.Thread):
         self.watchdog_interval_s = watchdog_interval_s
         self._watchdog_checked = -1e9
         self._manual = False        # True while the EC may be holding a manual level that we set
+        self.power_check = power_check          # True = on battery, False = AC, None = unknown
+        self._battery_active: bool | None = None  # is the battery override in force (None = not decided yet)
+        self._power_unknown_logged = False
 
     # ---------------------------------------------------------- public API
     def snapshot(self) -> Snapshot:
@@ -295,12 +303,37 @@ class ControlLoop(threading.Thread):
                 self._zero_since.pop(r.fan, None)
         return tuple(stalled)
 
+    def _battery_override(self) -> bool:
+        """Should the EC run the fans because we are on battery? Worked out every
+        cycle from the power state and the setting; never stored in cfg["mode"]."""
+        on_batt = None
+        if self.power_check:
+            try:
+                on_batt = self.power_check()
+            except Exception:
+                log.debug("power check failed", exc_info=True)
+        if on_batt is None and self.power_check and not self._power_unknown_logged:
+            log.info("Power source unknown - treating it as AC power")
+            self._power_unknown_logged = True
+        active = bool(on_batt) and bool(self.cfg.get("battery_ec_auto", True))
+        if active != self._battery_active:
+            if active:
+                log.info("On battery - fans to EC auto%s (your choice resumes on AC power)",
+                         " at start" if self._battery_active is None else "")
+            elif self._battery_active is not None:
+                why = "On AC power" if not on_batt else "Battery setting turned off"
+                log.info("%s - back to %s", why, "EC Auto" if self.cfg["mode"] == "auto" else "your fan curve")
+            self._battery_active = active
+        return active
+
     def _one_cycle(self) -> None:
         skip = set(self.cfg["ignore_sensors"]) - set(PROTECTED_SENSORS)
         raw = self.fans.read_sensors(skip=skip)
         temps = self.filter.update(raw)
         readings = self.fans.read_fans()
-        decision = self.policy.decide(temps, self.cfg["mode"])
+        battery = self._battery_override()
+        # The effective mode for this cycle only. self.cfg["mode"] (the saved choice) is not touched.
+        decision = self.policy.decide(temps, AUTO if battery else self.cfg["mode"])
         readings = self._apply(decision, readings)
         stalled = self._check_stalls(decision, readings)
         self.ec_errors = 0
@@ -317,7 +350,11 @@ class ControlLoop(threading.Thread):
             status = ST_FAULT
             msg = " / ".join(f"Fan {f} not spinning" for f in stalled) + " - check the fan"
         elif self.readonly:
-            status, msg = ST_READONLY, f"Read-only test: would set level {would}"
+            status, msg = ST_READONLY, (f"Read-only test: would set level {would}"
+                                        + (" (on battery)" if battery and self.cfg["mode"] != "auto" else ""))
+        elif battery and self.cfg["mode"] != "auto":
+            status, msg = ST_BATTERY, ("On battery - EC Auto. Your curve resumes on AC power "
+                                       "(or untick the battery option in Settings)")
         elif decision.mode == AUTO and self.cfg["mode"] == "auto":
             status, msg = ST_AUTO, "EC Auto (BIOS curve)"
         elif decision.mode == AUTO:

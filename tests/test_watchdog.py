@@ -387,5 +387,46 @@ class TestWatchdogKeeper(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
 
+class TestSpawn(unittest.TestCase):
+    """spawn() on the Windows path, with Popen faked: nothing is started."""
+    BREAKAWAY = 0x01000000
+
+    def run_spawn(self, refuse_breakaway: bool, refuse_all: bool = False):
+        from unittest import mock
+        from customfan import watchdog
+        flags_seen = []
+
+        def fake_popen(cmd, creationflags=0, **kw):
+            flags_seen.append(creationflags)
+            if refuse_all or (refuse_breakaway and creationflags & self.BREAKAWAY):
+                raise PermissionError(13, "[WinError 5] Access is denied")
+            return mock.Mock()
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(watchdog.sys, "platform", "win32"), \
+                mock.patch.object(watchdog.subprocess, "Popen", fake_popen):
+            return watchdog.spawn(Path(d)), flags_seen
+
+    def test_breakaway_allowed_reports_outside_the_job(self):
+        (ok, detail), flags = self.run_spawn(refuse_breakaway=False)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "outside the task's job")
+        self.assertEqual(len(flags), 1)
+
+    def test_refused_breakaway_logs_the_real_error(self):
+        # Seen on hardware: a Task Scheduler job refuses breakaway with WinError 5.
+        (ok, detail), flags = self.run_spawn(refuse_breakaway=True)
+        self.assertTrue(ok)
+        self.assertTrue(detail.startswith("inside the task's job"), detail)
+        self.assertIn("Access is denied", detail)
+        self.assertTrue(flags[0] & self.BREAKAWAY and not flags[1] & self.BREAKAWAY)
+
+    def test_both_attempts_failing_returns_the_error(self):
+        (ok, detail), flags = self.run_spawn(refuse_breakaway=True, refuse_all=True)
+        self.assertFalse(ok)
+        self.assertIn("Access is denied", detail)
+        self.assertEqual(len(flags), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

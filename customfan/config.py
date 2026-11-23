@@ -32,6 +32,7 @@ DEFAULTS: dict = {
     "stall_check_s": 20,
     "max_ec_errors": 5,
     "allow_hwinfo": False,              # True only if HWiNFO's EC support is turned off
+    "battery_ec_auto": True,            # on battery the EC runs the fans; "mode" is never changed by it
     "tray_pinned_for": [],              # exe paths whose tray icon we've pinned once
 }
 
@@ -95,6 +96,11 @@ def validate(cfg: dict) -> tuple[dict, list[str]]:
                 problems.append(f"mode={val!r} invalid, using curve")
         elif key == "allow_hwinfo":
             out[key] = bool(val)
+        elif key == "battery_ec_auto":
+            if isinstance(val, bool):
+                out[key] = val
+            else:
+                problems.append(f"{key}={val!r} invalid (true or false), using {str(default).lower()}")
         elif key == "tray_pinned_for":
             if isinstance(val, list) and all(isinstance(x, str) for x in val):
                 out[key] = sorted({x.lower() for x in val})

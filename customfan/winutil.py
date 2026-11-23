@@ -132,6 +132,25 @@ def promote_tray_icon(exe_path: str) -> str:
     return PIN_PROMOTED if changed else PIN_ALREADY
 
 
+class _SYSTEM_POWER_STATUS(ctypes.Structure):
+    _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
+                ("BatteryLifePercent", ctypes.c_ubyte), ("SystemStatusFlag", ctypes.c_ubyte),
+                ("BatteryLifeTime", ctypes.c_ulong), ("BatteryFullLifeTime", ctypes.c_ulong)]
+
+
+def on_battery() -> bool | None:
+    """True on battery, False on AC, None if Windows doesn't know (or not Windows).
+
+    GetSystemPowerStatus is a cheap kernel query (no EC access), so it is safe
+    to ask every control cycle. ACLineStatus: 0 = offline, 1 = online, 255 = unknown."""
+    if not IS_WINDOWS:
+        return None
+    st = _SYSTEM_POWER_STATUS()
+    if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(st)):
+        return None
+    return {0: True, 1: False}.get(st.ACLineStatus)
+
+
 def running_controllers() -> list[str]:
     """Names of other fan-control programs currently running."""
     return running_processes(OTHER_CONTROLLERS)

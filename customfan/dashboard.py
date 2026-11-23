@@ -39,7 +39,8 @@ SS = 2                                          # supersampling factor for anti-
 _BOX = getattr(getattr(Image, "Resampling", Image), "BOX")
 SPARK_WINDOW_S = 300.0
 STATUS_WORDS = {            # status -> (short word for the Controller card, colour)
-    "ok": ("On curve", T.TEXT), "auto": ("EC auto", T.TEXT), "starting": ("Starting", T.TEXT2),
+    "ok": ("On curve", T.TEXT), "auto": ("EC auto", T.TEXT), "battery": ("On battery", T.TEXT),
+    "starting": ("Starting", T.TEXT2),
     "readonly": ("Read-only", T.TEXT), "handover": ("EC in control", T.WARN), "paused": ("Paused", T.WARN),
     "fault": ("Fault", T.CRIT), "error": ("No EC access", T.CRIT),
 }

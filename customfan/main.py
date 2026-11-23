@@ -110,7 +110,8 @@ def main(argv: list[str] | None = None) -> None:
     loop = ControlLoop(open_io, cfg, readonly=args.readonly,
                        conflict_check=None if args.simulate else winutil.running_ec_monitors,
                        cycle_log=CycleLog(cycle_csv),
-                       lease=lease, watchdog_check=keeper.check if keeper else None)
+                       lease=lease, watchdog_check=keeper.check if keeper else None,
+                       power_check=winutil.on_battery)     # real power state even in --simulate (no EC access)
     atexit.register(loop.shutdown_hardware)      # last-resort hand-back to the EC
     loop.start()
 

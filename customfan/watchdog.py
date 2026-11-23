@@ -229,7 +229,8 @@ def spawn(app_dir: Path) -> tuple[bool, str]:
                 subprocess.Popen(cmd, creationflags=flags, **kw)
             else:
                 subprocess.Popen(cmd, **kw)
-            return True, label
+            # Say why an earlier attempt failed (e.g. the task's job refusing breakaway)
+            return True, f"{label}; earlier attempt failed: {last}" if last else label
         except OSError as e:
             last = str(e)
     return False, last

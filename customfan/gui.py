@@ -26,7 +26,7 @@ from .dashboard import Dashboard
 from .events import LogBuffer, read_tail
 from .history import History
 from .pages import CurvesPage, EventsPage, SensorsPage, SettingsPage
-from .service import (ControlLoop, Snapshot, ST_AUTO, ST_ERROR, ST_FAULT, ST_HANDOVER, ST_OK,
+from .service import (ControlLoop, Snapshot, ST_AUTO, ST_BATTERY, ST_ERROR, ST_FAULT, ST_HANDOVER, ST_OK,
                       ST_PAUSED, ST_READONLY, ST_STARTING)
 from .widgets import NavBar
 
@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 STATUS_COLORS = {
     ST_OK: "#22a35a",        # green: your curve is in control
     ST_AUTO: "#3b82f6",      # blue: EC Auto chosen
+    ST_BATTERY: "#3b82f6",   # blue too: on battery, EC Auto until AC power returns
     ST_HANDOVER: "#f59e0b",  # orange: EC temporarily in control (hot / sensor issue)
     ST_PAUSED: "#f59e0b",    # orange: paused because another program is using the EC
     ST_READONLY: "#a855f7",  # purple: read-only test mode
@@ -44,7 +45,8 @@ STATUS_COLORS = {
     "stale": "#9ca3af",      # grey: control loop not responding
 }
 STATUS_TITLES = {
-    ST_OK: "Fan curve active", ST_AUTO: "EC Auto", ST_HANDOVER: "EC in control (safety)",
+    ST_OK: "Fan curve active", ST_AUTO: "EC Auto", ST_BATTERY: "On battery - EC Auto",
+    ST_HANDOVER: "EC in control (safety)",
     ST_PAUSED: "Paused - EC in control",
     ST_READONLY: "Read-only test", ST_FAULT: "FAULT", ST_ERROR: "Cannot reach EC",
     ST_STARTING: "Starting", "stale": "Not responding",

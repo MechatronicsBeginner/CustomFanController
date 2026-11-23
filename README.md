@@ -19,7 +19,7 @@ looks wrong.
 > | **Fans** | 2 (both controlled and read back) |
 > | **OS** | Windows 11 Pro, build 26300 |
 > | **Driver** | [PawnIO](https://github.com/namazso/PawnIO) with the `LpcACPIEC` module (access limited to EC ports `0x62`/`0x66`) |
-> | **Version tested** | 1.4.1. The EC access layer is unchanged from 1.3.0. 1.4.0 added the window; 1.4.1 adds the kill-safety watchdog and fixes tray-icon pinning for a new install folder. Run on this laptop under game load, overnight with several standby cycles, through lid-close and sleep tests, and in daily use for about four weeks. See [Known limitations](#known-limitations-141). |
+> | **Version tested** | 1.5.0. The EC access layer is unchanged from 1.3.0. 1.4.0 added the window; 1.4.1 added the kill-safety watchdog and fixed tray-icon pinning for a new install folder; 1.5.0 hands the fans to the EC while on battery. 1.4.x ran on this laptop under game load, overnight with several standby cycles, through lid-close and sleep tests, and in daily use for about four weeks. 1.5.0's battery mode was tested on the laptop as a script, not yet as the built exe. See [Known limitations](#known-limitations-150). |
 >
 > **Verified on that machine (1.3.0):** reading both fans' level and RPM; setting levels
 > 0–7 and handing back to EC auto, with read-back; sustained game load; start
@@ -34,6 +34,19 @@ looks wrong.
 > on later starts (logged on every start from 11 to 22 Nov 2026). Its
 > first-run pin was not verified on hardware: the log from that start no
 > longer exists.
+>
+> **Verified on that machine (1.5.0, run as a script, confirmed in the logs
+> and the Windows event log):** unplugging with the fans at level 5 handed
+> both to EC auto within half a second; closing the lid on battery entered
+> Modern Standby with the EC already in control (3 min 44 s, no manual
+> level held); plugging back in brought the curve back within a cycle;
+> starting while unplugged came up in EC auto; picking a mode from the tray
+> while on battery kept the EC in control until the laptop was plugged in;
+> the saved Fan curve choice was never changed. Not yet tested: the built
+> exe, and a reboot on battery through the scheduled task. Not confirmed:
+> unticking the battery option on battery to get the curve back without a
+> restart. It was reported as working, but the logs do not show the setting
+> being applied.
 >
 > **Not tested:** any other model or generation, single-fan ThinkPads, Windows
 > 10, hibernate, docking, uptimes of weeks, any BIOS other than the one used
@@ -84,7 +97,7 @@ built because the owner wanted sliders instead of editing curves in a file,
 both fans' RPM always on screen, a tray icon pinned to the taskbar, and
 fallback rules that could be read and tested.
 
-## Known limitations (1.4.1)
+## Known limitations (1.5.0)
 
 These are things observed on one laptop. None of them is explained.
 
@@ -97,12 +110,19 @@ These are things observed on one laptop. None of them is explained.
   laptop with a heavy load running.** Exiting hands both fans back to the
   EC. Handing them back automatically when the display turns off is
   planned, not built. The watchdog (see [Safety](#safety)) does not help
-  here: Windows freezes it too.
+  here: Windows freezes it too. On battery the fans are already on EC Auto
+  before standby, so unplugging first covers the usual case. Unplugging
+  while the laptop is already in standby is not covered, because the
+  program is frozen and cannot notice.
 - **The watchdog is a safety floor, not a replacement.** If the controller
   is killed, the watchdog hands the fans back to the EC's own curve, which
   runs quieter and hotter, until the controller is started again. The
   watchdog is a child process of the controller, so Task Manager's "End
   process tree", or ending both processes, removes it as well (not tested).
+  Started from a scheduled task, the watchdog also runs inside that task's
+  job (the log says "Watchdog started (inside the task's job)"), so ending
+  the task (End in Task Scheduler, or `Stop-ScheduledTask`) ends both and
+  leaves the fans at their last level (not tested).
 - **After waking.** Once, fan 1 was found at level 0 when it should have
   been 3, about 25 seconds after the first reading following a wake. The
   program noticed on its next check and re-applied the level. I do not know
@@ -126,7 +146,7 @@ These are things observed on one laptop. None of them is explained.
   | Fan curves | Each curve as a chart, with a marker for where the laptop is right now, the temperature the fans step *down* at, and the hand-over temperature. The sliders sit underneath and the chart follows them as you drag |
   | Sensors | Every EC temperature sensor: now, lowest and highest since start, what it is used for, and whether it is ignored |
   | Events | The program's log, filterable (all / changes / problems), with **Copy report** and **Open log folder** |
-  | Settings | Deadband, delay, hand-over and take-back temperatures, stall alarm, HWiNFO option |
+  | Settings | Deadband, delay, battery option, hand-over and take-back temperatures, stall alarm, HWiNFO option |
 
   The graphs are drawn slightly behind real time so the lines glide between
   readings instead of stepping, and nothing extra is read from the EC to do
@@ -142,12 +162,18 @@ These are things observed on one laptop. None of them is explained.
   up immediately. They step down once the temperature has fallen a set
   "deadband" below the step, and (optionally) stayed there for a step-down
   delay, so short dips don't make them cycle.
+- **On battery, the BIOS runs the fans** (EC Auto), and your curve comes back
+  by itself on AC power. This is worked out every few seconds and never
+  changes your saved Fan curve / EC Auto choice. Picking a mode from the tray
+  while on battery is saved, but takes effect once you plug in. To use your
+  curve on battery too, untick "On battery, let the BIOS run the fans" on the
+  Settings page (it takes effect at once, no restart).
 - **Tray dot colours:**
 
   | Colour | Meaning |
   |---|---|
   | Green | Your curve is running the fans |
-  | Blue | EC Auto (BIOS curve) is selected |
+  | Blue | EC Auto (BIOS curve) is selected, or the laptop is on battery |
   | Orange | The EC has temporarily taken over (hot, the CPU sensor dropped out, or paused for HWiNFO) |
   | Red | A fan isn't spinning when commanded, or the EC stopped responding |
   | Grey | The control loop isn't responding |
@@ -260,6 +286,7 @@ The only EC registers this program ever **writes** are the fan selector
 Both fans are handed back to the EC (`0x80`) when any of these happen:
 
 - you pick EC Auto;
+- the laptop is on battery (unless you untick that option);
 - any monitored sensor reaches the hand-over temperature (set on the Settings
   page; control resumes at the lower "take back" temperature);
 - the CPU sensor stops reporting;

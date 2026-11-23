@@ -383,6 +383,7 @@ class SettingsPage(tk.Frame):
         self.v = {k: tk.IntVar() for k in ("deadband_c", "step_down_delay_s", "handover_c", "resume_c",
                                            "cycle_s", "stall_check_s")}
         self.v_hwinfo = tk.BooleanVar()
+        self.v_battery = tk.BooleanVar()
         hdr, _ = page_header(self, "Settings", "behavior and safety")
         hdr.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, T.px(10)))
         self.columnconfigure((0, 1), weight=1, uniform="cols")
@@ -397,6 +398,11 @@ class SettingsPage(tk.Frame):
                      "short dips instead of cycling.")
         self._slider(g1, "Update every (s)", "cycle_s", *L["cycle_s"],
                      "How often temperatures are read. 2-5 s is plenty; faster only adds EC traffic.")
+        ttk.Checkbutton(g1, text="On battery, let the BIOS run the fans (EC Auto)", variable=self.v_battery,
+                        style="Card.TCheckbutton", command=self.on_dirty).pack(anchor="w", pady=(T.px(8), 0))
+        tk.Label(g1, text="Your curve comes back by itself on AC power. Untick this to use your curve on battery "
+                          "too. It never changes your Fan curve / EC Auto choice.", bg=T.SURFACE, fg=T.TEXT2,
+                 font=T.font(8), wraplength=T.px(380), justify="left").pack(anchor="w")
 
         g2 = self._group(0, 1, "Safety")
         self._slider(g2, "Hand to EC at (°C)", "handover_c", *L["handover_c"],
@@ -441,9 +447,11 @@ class SettingsPage(tk.Frame):
         for key, var in self.v.items():
             var.set(cfg[key])
         self.v_hwinfo.set(cfg["allow_hwinfo"])
+        self.v_battery.set(cfg["battery_ec_auto"])
 
     def collect(self, cfg: dict) -> None:
-        cfg.update({k: v.get() for k, v in self.v.items()}, allow_hwinfo=self.v_hwinfo.get())
+        cfg.update({k: v.get() for k, v in self.v.items()}, allow_hwinfo=self.v_hwinfo.get(),
+                   battery_ec_auto=self.v_battery.get())
 
     def update_view(self, s, cfg: dict) -> None:
         pass

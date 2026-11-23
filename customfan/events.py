@@ -18,7 +18,8 @@ from typing import Iterable, Optional
 
 LEVELS_PROBLEM = ("WARNING", "ERROR", "CRITICAL")
 CHANGE_PREFIXES = ("Fans ->", "Would set fans ->", "Mode changed", "Settings applied", "Settings saved",
-                   "Stall alarm cleared", "EC conflict gone")
+                   "Stall alarm cleared", "EC conflict gone", "On battery", "On AC power",
+                   "Battery setting turned off")
 FILTERS = (("all", "All"), ("changes", "Changes"), ("problems", "Problems"))
 
 # 2026-10-24 21:07:48,563 INFO    customfan.service: EC access OK (control)
