@@ -54,7 +54,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--readonly", action="store_true", help="read sensors and fans, never write")
     ap.add_argument("--show", action="store_true", help="open the window at start (default: tray only)")
     ap.add_argument("--debug", action="store_true", help="verbose log")
+    ap.add_argument("--watchdog", action="store_true", help=argparse.SUPPRESS)   # internal: the safety-net process
     args = ap.parse_args(argv)
+
+    if args.watchdog:                       # no window, no curve: only hands the fans back if the controller dies
+        from . import watchdog
+        sys.exit(watchdog.main(APP_DIR))
 
     logpath = setup_logging(args.debug)
     log.info("=== %s %s starting (exe=%s simulate=%s readonly=%s) ===", APP_NAME, __version__,
@@ -96,9 +101,16 @@ def main(argv: list[str] | None = None) -> None:
             return PawnIOPortIO(module)
 
     cycle_csv = APP_DIR / "logs" / ("cycles.simulate.csv" if args.simulate else "cycles.csv")
+    lease = keeper = None
+    if not args.simulate and not args.readonly:      # only a controller that can write the fans needs a watchdog
+        from .lease import LeaseWriter
+        from .watchdog import CONTROLLER_LEASE, WatchdogKeeper
+        lease = LeaseWriter(APP_DIR / "logs" / CONTROLLER_LEASE, cycle_s=float(cfg["cycle_s"]))
+        keeper = WatchdogKeeper(APP_DIR)
     loop = ControlLoop(open_io, cfg, readonly=args.readonly,
                        conflict_check=None if args.simulate else winutil.running_ec_monitors,
-                       cycle_log=CycleLog(cycle_csv))
+                       cycle_log=CycleLog(cycle_csv),
+                       lease=lease, watchdog_check=keeper.check if keeper else None)
     atexit.register(loop.shutdown_hardware)      # last-resort hand-back to the EC
     loop.start()
 

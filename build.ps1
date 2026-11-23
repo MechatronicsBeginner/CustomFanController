@@ -20,6 +20,9 @@ $work = Join-Path $env:TEMP "CustomFanController-build"
 if (Get-Process CustomFanController -ErrorAction SilentlyContinue) {
     throw "CustomFanController.exe is running. Exit it from the tray first (fans go back to the BIOS)."
 }
+if (Get-Process CustomFanWatchdog -ErrorAction SilentlyContinue) {
+    throw "CustomFanWatchdog.exe is still running. It stops by itself a couple of seconds after the controller exits - wait and run this again."
+}
 
 py -3 -m pip install --upgrade pyinstaller pystray pillow
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
@@ -37,6 +40,10 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
 Copy-Item (Join-Path $root "LpcACPIEC.bin") $out -Force
 New-Item -ItemType Directory (Join-Path $out "assets") -Force | Out-Null
 Copy-Item (Join-Path $root "assets\app.ico") (Join-Path $out "assets") -Force
+# The watchdog is the same program under a second name, so that killing
+# "CustomFanController.exe" by name (taskkill /IM, End task on that name)
+# does not take the safety net down with it.
+Copy-Item (Join-Path $out "CustomFanController.exe") (Join-Path $out "CustomFanWatchdog.exe") -Force
 # Carry existing settings over from script mode (first build only)
 $cfg = Join-Path $root "config.json"
 if ((Test-Path $cfg) -and -not (Test-Path (Join-Path $out "config.json"))) {

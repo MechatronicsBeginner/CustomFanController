@@ -51,8 +51,10 @@ def claim_single_instance(name: str = "Local\\CustomFanController.SingleInstance
 #   HKCU\Control Panel\NotifyIconSettings\<random id>
 # with ExecutablePath (the program) and IsPromoted (DWORD: 1 = always shown on
 # the taskbar, 0 = in the ^ overflow). The subkey only appears after the
-# program has shown its icon once. Windows identifies the icon by EXECUTABLE,
-# so under pythonw.exe this pins every pythonw tray icon; the built
+# program has shown its icon once. Windows identifies the icon by the
+# executable's FULL PATH: the same exe copied to a new folder is a new entry
+# (unpinned), so pin memory and matching must use the path, not the file name.
+# Under pythonw.exe pinning would pin every pythonw tray icon; the built
 # CustomFanController.exe gets its own entry.
 NOTIFY_ICON_KEY = r"Control Panel\NotifyIconSettings"
 
@@ -62,16 +64,38 @@ PIN_NOT_FOUND = "not-found"      # Windows hasn't created the entry yet
 PIN_UNSUPPORTED = "unsupported"  # not Windows 11 22H2+, or no registry access
 
 
-def path_matches_exe(executable_path: str, exe_name: str) -> bool:
-    """ExecutablePath may be a full path or start with a known-folder GUID,
-    e.g. '{F1B32785-...}\\Programs\\Python\\Python312\\pythonw.exe'.
-    Matching on the file name handles both."""
-    p = executable_path.replace("/", "\\").rstrip("\\").lower()
-    name = exe_name.lower()
-    return p == name or p.endswith("\\" + name)
+def _norm(path: str) -> str:
+    return path.replace("/", "\\").rstrip("\\").lower()
 
 
-def promote_tray_icon(exe_name: str) -> str:
+def path_matches_exe(executable_path: str, exe: str) -> bool:
+    """Does a NotifyIconSettings ExecutablePath refer to `exe`?
+
+    `exe` is normally a full path, and then only that exact file matches - a
+    copy of the same program in another folder is a different tray entry.
+    ExecutablePath may also start with a known-folder GUID instead of a drive,
+    e.g. '{F1B32785-...}\\Programs\\Python\\Python312\\pythonw.exe'; then the part
+    after the GUID must be the tail of `exe`. A bare file name (no folder)
+    keeps the old match-by-name behaviour."""
+    p, target = _norm(executable_path), _norm(exe)
+    if "\\" not in target:                       # bare name
+        return p == target or p.endswith("\\" + target)
+    if p == target:
+        return True
+    if p.startswith("{") and "}\\" in p:          # known-folder form
+        rest = p.split("}\\", 1)[1]
+        return bool(rest) and target.endswith("\\" + rest)
+    return False
+
+
+def needs_pin(exe_path: str, pinned_for: list[str]) -> bool:
+    """True unless this exact exe path was pinned before. Entries from older
+    versions that stored only the file name do not count, because Windows
+    treats each folder's copy as a separate tray icon."""
+    return _norm(exe_path) not in {_norm(x) for x in pinned_for}
+
+
+def promote_tray_icon(exe_path: str) -> str:
     if not IS_WINDOWS:
         return PIN_UNSUPPORTED
     import winreg
@@ -91,7 +115,7 @@ def promote_tray_icon(exe_name: str) -> str:
             try:
                 with winreg.OpenKey(root, sub, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
                     path, _ = winreg.QueryValueEx(k, "ExecutablePath")
-                    if not path_matches_exe(str(path), exe_name):
+                    if not path_matches_exe(str(path), exe_path):
                         continue
                     found += 1
                     try:

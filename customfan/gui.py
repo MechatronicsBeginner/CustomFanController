@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import queue
 import sys
 import threading
@@ -266,10 +267,11 @@ class App:
             self.icon = None
 
     def _schedule_pin(self) -> None:
-        """First run only (per executable): pin the tray icon so it shows on the
+        """First run only (per exe LOCATION): pin the tray icon so it shows on the
         taskbar instead of in the ^ overflow. Later choices in Windows Settings
-        are left alone, because we never pin the same executable twice."""
-        self._pin_exe = Path(sys.executable).name
+        are left alone, because we never pin the same exe path twice. A copy in
+        a new folder is a new tray entry to Windows, so it gets pinned once too."""
+        self._pin_exe = os.path.abspath(sys.executable)
         if self.icon is None or not winutil.IS_WINDOWS:
             return
         if not getattr(sys, "frozen", False):
@@ -277,7 +279,8 @@ class App:
             # pin every Python tray icon. Only the built exe pins itself.
             log.info("Running as a script: tray icon not auto-pinned (build the exe for that)")
             return
-        if self._pin_exe.lower() in self.cfg.get("tray_pinned_for", []):
+        if not winutil.needs_pin(self._pin_exe, self.cfg.get("tray_pinned_for", [])):
+            log.info("Tray icon was pinned once for this exe path before; leaving Windows' setting as it is")
             return
         # Windows registers the icon a moment after it first appears; retry a few times.
         self._pin_delays = [2000, 6000, 15000, 45000]
@@ -298,7 +301,7 @@ class App:
             log.info("Windows hasn't registered the tray icon yet; will try again next start")
 
     def _remember_pinned(self) -> None:
-        pinned = set(self.cfg.get("tray_pinned_for", [])) | {self._pin_exe.lower()}
+        pinned = set(self.cfg.get("tray_pinned_for", [])) | {self._pin_exe.lower()}   # full path
         self.cfg["tray_pinned_for"] = sorted(pinned)
         try:
             cfgmod.save(self.cfg_path, self.cfg)

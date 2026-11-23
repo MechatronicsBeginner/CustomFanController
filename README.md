@@ -19,13 +19,21 @@ looks wrong.
 > | **Fans** | 2 (both controlled and read back) |
 > | **OS** | Windows 11 Pro, build 26300 |
 > | **Driver** | [PawnIO](https://github.com/namazso/PawnIO) with the `LpcACPIEC` module (access limited to EC ports `0x62`/`0x66`) |
-> | **Version tested** | 1.4.0. The window is new; the EC access layer is unchanged from 1.3.0. Run on this laptop under game load, overnight with several standby cycles, and through lid-close and sleep tests. See [Known limitations](#known-limitations-140). |
+> | **Version tested** | 1.4.1. The EC access layer is unchanged from 1.3.0. 1.4.0 added the window; 1.4.1 adds the kill-safety watchdog and fixes tray-icon pinning for a new install folder. Run on this laptop under game load, overnight with several standby cycles, through lid-close and sleep tests, and in daily use for about four weeks. See [Known limitations](#known-limitations-141). |
 >
 > **Verified on that machine (1.3.0):** reading both fans' level and RPM; setting levels
 > 0–7 and handing back to EC auto, with read-back; sustained game load; start
 > at logon from a scheduled task; one sleep/wake cycle (fan register survived
 > it); running on battery; pausing while HWiNFO is open and resuming when it
 > closes; several days of daily use.
+>
+> **Verified on that machine (1.4.1):** ending `CustomFanController.exe` in
+> Task Manager while the fans were in manual mode; the watchdog handed both
+> fans back to EC auto within about a second (confirmed in the logs). The
+> fixed build remembers its exe path and leaves Windows' tray setting alone
+> on later starts (logged on every start from 11 to 22 Nov 2026). Its
+> first-run pin was not verified on hardware: the log from that start no
+> longer exists.
 >
 > **Not tested:** any other model or generation, single-fan ThinkPads, Windows
 > 10, hibernate, docking, uptimes of weeks, any BIOS other than the one used
@@ -76,7 +84,7 @@ built because the owner wanted sliders instead of editing curves in a file,
 both fans' RPM always on screen, a tray icon pinned to the taskbar, and
 fallback rules that could be read and tested.
 
-## Known limitations (1.4.0)
+## Known limitations (1.4.1)
 
 These are things observed on one laptop. None of them is explained.
 
@@ -88,7 +96,13 @@ These are things observed on one laptop. None of them is explained.
   **Exit the program from the tray before closing the lid or leaving the
   laptop with a heavy load running.** Exiting hands both fans back to the
   EC. Handing them back automatically when the display turns off is
-  planned, not built.
+  planned, not built. The watchdog (see [Safety](#safety)) does not help
+  here: Windows freezes it too.
+- **The watchdog is a safety floor, not a replacement.** If the controller
+  is killed, the watchdog hands the fans back to the EC's own curve, which
+  runs quieter and hotter, until the controller is started again. The
+  watchdog is a child process of the controller, so Task Manager's "End
+  process tree", or ending both processes, removes it as well (not tested).
 - **After waking.** Once, fan 1 was found at level 0 when it should have
   been 3, about 25 seconds after the first reading following a wake. The
   program noticed on its next check and re-applied the level. I do not know
@@ -195,8 +209,9 @@ yourself, after step d above:
 pwsh -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-This produces `dist\CustomFanController\CustomFanController.exe` and copies
-`LpcACPIEC.bin` next to it.
+This produces `dist\CustomFanController\CustomFanController.exe`, a copy of
+it named `CustomFanWatchdog.exe` (see [Safety](#safety)), and copies
+`LpcACPIEC.bin` next to them. Keep all three together if you move the folder.
 
 ### Starting at logon (optional)
 
@@ -219,11 +234,15 @@ It refuses to start if it finds one.
 ## Keeping the icon on the taskbar
 
 On its first run as the built exe, the app pins its tray icon so it sits next
-to the clock instead of in the ^ overflow. It does this once per program. If
-you later hide it in Windows Settings, it won't fight you. This needs
-Windows 11 22H2 or newer.
+to the clock instead of in the ^ overflow. It does this once per exe
+location. If you later hide it in Windows Settings, it won't fight you. This
+needs Windows 11 22H2 or newer.
 
-Windows remembers tray icons **per program**, so build the exe:
+Windows remembers tray icons **per executable path**: a copy of the exe in a
+new folder is a new, unpinned icon to Windows, so the app pins that copy once
+too. (1.4.0 matched by file name, so it skipped pinning when a copied config
+already listed the exe name.)
+Build the exe:
 
 | How you run it | What Windows sees |
 |---|---|
@@ -246,10 +265,25 @@ Both fans are handed back to the EC (`0x80`) when any of these happen:
 - the CPU sensor stops reporting;
 - 5 consecutive EC errors;
 - an unexpected error;
-- the program exits.
+- the program exits;
+- the program is killed or stops responding (handled by the watchdog, below).
 
 Other protections:
 
+- **Watchdog.** None of the hand-backs above can run if the process is
+  killed (Task Manager "End task", a crash), and the EC keeps obeying the
+  last level it was given; at level 0 that means the fans stay off. So the
+  controller starts a small second process, `CustomFanWatchdog.exe` (the same
+  program under another name, so ending one by name does not end both). On
+  every cycle the controller writes `logs\controller.lease` with its process
+  id, a counter, and whether the fans may be in manual mode. That flag is
+  set before the first manual write and cleared only after a hand-back has
+  been read back as EC auto. If the controller's process is gone (about
+  1 s), or the counter stops for 12 s (or 4 cycles, whichever is longer)
+  while the flag is set, the watchdog hands both fans back to the EC with
+  the same verified hand-back. It never reads the EC otherwise. A clean exit
+  removes the lease and the watchdog stops. It is not started in
+  `--readonly` or `--simulate`.
 - Only levels 0–7 and `0x80` can ever be written. Disengaged mode (`0x40`,
   which removes the regulation limit) is refused.
 - The EC handshake follows TPFanCtrl2 v2.8.2 step for step. In particular it
@@ -280,12 +314,15 @@ Other protections:
 | `CustomFanController.pyw` | Run as a script (testing) |
 | `requirements.txt` | Python packages (`pystray`, `pillow`) |
 | `customfan/` | The program. `service.py`/`control.py`/`thinkpad.py`/`ec.py`/`pawnio.py` talk to the hardware; `gui.py`, `pages.py`, `dashboard.py`, `widgets.py`, `theme.py` are the window; `history.py`, `events.py`, `report.py` hold the data behind it and have no Tk or hardware in them |
-| `build.ps1` | Builds `dist\CustomFanController\CustomFanController.exe` (daily use) |
+| `customfan/lease.py`, `customfan/watchdog.py` | The kill-safety watchdog (see Safety) |
+| `build.ps1` | Builds `dist\CustomFanController\CustomFanController.exe` (daily use) and its `CustomFanWatchdog.exe` copy |
 | `LpcACPIEC.bin` | **You supply this** (see Setup). Not in the repository |
 | `config.json` | Your settings. Created next to whichever you run, the .pyw or the .exe |
 | `config.simulate.json` | Settings used by `--simulate`, kept separate so experiments never change your real curve |
 | `logs\CustomFanController.log` | Mode changes, level changes, safety events and errors |
 | `logs\cycles.csv` | One row per cycle: temperatures, requested levels, both fans' levels and RPM. Open in Excel to tune the curve from real data. Capped at about 2 MB |
+| `logs\watchdog.log` | What the watchdog saw and did (start, stop, any hand-back) |
+| `logs\controller.lease`, `logs\watchdog.lease` | Small "still alive" files the controller and watchdog use to check on each other |
 | `tests\` | Runs against a simulated EC; never touches hardware |
 
 Run the tests (any OS, no hardware needed): `python -m unittest discover -s tests -v`

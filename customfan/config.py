@@ -32,7 +32,7 @@ DEFAULTS: dict = {
     "stall_check_s": 20,
     "max_ec_errors": 5,
     "allow_hwinfo": False,              # True only if HWiNFO's EC support is turned off
-    "tray_pinned_for": [],              # exe names whose tray icon we've pinned once
+    "tray_pinned_for": [],              # exe paths whose tray icon we've pinned once
 }
 
 LIMITS = {

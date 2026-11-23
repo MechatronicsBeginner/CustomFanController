@@ -434,3 +434,41 @@ class TestTrayPin(unittest.TestCase):
         cfg, problems = cfgmod.validate({"tray_pinned_for": ["CustomFanController.EXE"]})
         self.assertEqual(cfg["tray_pinned_for"], ["customfancontroller.exe"])
         self.assertFalse(problems)
+
+class TestTrayPinByPath(TestTrayPin):
+    """Windows keys tray icons by the exe's full path. v1.4.0 remembered pins by
+    file name, so a new install folder never got pinned (seen on the real laptop:
+    1.4 in C:\\Tools\\CustomFanController-1.4 stayed in the ^ overflow)."""
+
+    OLD = r"C:\Tools\CustomFanController\dist\CustomFanController\CustomFanController.exe"
+    NEW = r"C:\Tools\CustomFanController-1.4\CustomFanController.exe"
+
+    def test_new_folder_needs_pin_even_if_name_was_pinned(self):
+        from customfan.winutil import needs_pin
+        self.assertTrue(needs_pin(self.NEW, ["customfancontroller.exe"]))     # old name-only memory
+        self.assertTrue(needs_pin(self.NEW, [self.OLD.lower()]))             # other folder pinned
+        self.assertFalse(needs_pin(self.NEW, [self.NEW.lower()]))            # this folder: never again
+        self.assertFalse(needs_pin(self.NEW.upper(), [self.NEW.lower()]))    # case doesn't matter
+
+    def test_full_path_matching(self):
+        from customfan.winutil import path_matches_exe
+        self.assertTrue(path_matches_exe(self.NEW, self.NEW.lower()))
+        self.assertFalse(path_matches_exe(self.OLD, self.NEW))               # same name, other folder
+        self.assertTrue(path_matches_exe(r"{6D809377-6AF0-444B-8957-A3773F02200E}\CFC\CustomFanController.exe",
+                                         r"C:\Program Files\CFC\CustomFanController.exe"))
+        self.assertFalse(path_matches_exe(r"{6D809377-6AF0-444B-8957-A3773F02200E}\Other\CustomFanController.exe",
+                                          r"C:\Program Files\CFC\CustomFanController.exe"))
+
+    def test_promotes_only_the_running_copy(self):
+        entries = {
+            "1": {"ExecutablePath": self.OLD, "IsPromoted": 0},   # user hid the old one: leave it
+            "2": {"ExecutablePath": self.NEW},
+        }
+        self.assertEqual(self.run_promote(entries, self.NEW), "promoted")
+        self.assertEqual(entries["2"]["IsPromoted"], 1)
+        self.assertEqual(entries["1"]["IsPromoted"], 0)
+
+    def test_full_path_survives_config_roundtrip(self):
+        cfg, problems = cfgmod.validate({"tray_pinned_for": [self.NEW]})
+        self.assertEqual(cfg["tray_pinned_for"], [self.NEW.lower()])
+        self.assertFalse(problems)

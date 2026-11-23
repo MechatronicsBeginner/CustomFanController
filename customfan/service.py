@@ -12,6 +12,12 @@ Failsafes (each one hands both fans back to the EC with 0x80):
   * any unexpected exception in the loop
   * program exit or stop (normal path, plus atexit in the entry point)
 
+None of those can run if the process is killed. For that case the loop publishes
+a lease (lease.py) on every iteration - "manual" is announced BEFORE the first
+manual level is written and withdrawn only AFTER a hand-back has been verified -
+and a separate watchdog process (watchdog.py) hands the fans back if the
+controller is gone or stuck while the lease says manual.
+
 Re-assert: every cycle reads both fans' 0x2F back. If the EC changed it on
 its own (sleep/resume, firmware override), the level is written again.
 """
@@ -31,6 +37,7 @@ from .control import AUTO, CURVE, Decision, Policy, SensorFilter
 from .ec import ECError, EmbeddedController
 from .thinkpad import LEVEL_AUTO, FanReading, ThinkPadFans, describe_level
 from .config import PROTECTED_SENSORS
+from .lease import LeaseWriter
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +109,9 @@ class ControlLoop(threading.Thread):
                  readonly: bool = False, on_snapshot: Callable[[Snapshot], None] | None = None,
                  cycle_override_s: float | None = None, ec_wait_timeout_s: float = 0.5,
                  conflict_check: Callable[[], list] | None = None,
-                 conflict_interval_s: float = 10.0, cycle_log: CycleLog | None = None) -> None:
+                 conflict_interval_s: float = 10.0, cycle_log: CycleLog | None = None,
+                 lease: LeaseWriter | None = None, watchdog_check: Callable[[], bool] | None = None,
+                 watchdog_interval_s: float = 10.0) -> None:
         super().__init__(name="fan-control", daemon=True)
         self._open_io = open_io
         self.cfg = cfg
@@ -131,6 +140,11 @@ class ControlLoop(threading.Thread):
         self._stall_reported: set[int] = set()
         self.heartbeat = time.monotonic()
         self.restored_on_exit = False
+        self.lease = lease
+        self.watchdog_check = watchdog_check
+        self.watchdog_interval_s = watchdog_interval_s
+        self._watchdog_checked = -1e9
+        self._manual = False        # True while the EC may be holding a manual level that we set
 
     # ---------------------------------------------------------- public API
     def snapshot(self) -> Snapshot:
@@ -195,8 +209,39 @@ class ControlLoop(threading.Thread):
             return False
         log.info("EC access OK (%s)", "read-only" if self.readonly else "control")
         if not self.readonly:
-            self.fans.restore_auto()          # start from a known state
+            self._restore_auto()              # start from a known state
         return True
+
+    # ------------------------------------------------ lease / watchdog (see lease.py)
+    def _beat(self) -> None:
+        if self.lease:
+            self.lease.cycle_s = self._cycle_s()
+            self.lease.beat(self._manual)
+
+    def _set_manual(self, manual: bool) -> None:
+        """Record whether the EC may be holding a manual level, and publish it at once.
+        Called BEFORE the first manual write (so the watchdog already knows) and
+        withdrawn only AFTER a hand-back has been verified by reading the EC back."""
+        if manual != self._manual:
+            self._manual = manual
+            self._beat()
+
+    def _restore_auto(self) -> bool:
+        ok = self.fans.restore_auto()
+        self._set_manual(not ok)          # an unverified hand-back stays "manual"
+        return ok
+
+    def _check_watchdog(self) -> None:
+        if not self.watchdog_check or self.readonly:
+            return
+        now = time.monotonic()
+        if now - self._watchdog_checked < self.watchdog_interval_s:
+            return
+        self._watchdog_checked = now
+        try:
+            self.watchdog_check()
+        except Exception:
+            log.exception("watchdog check failed")
 
     def _close_io(self) -> None:
         close = getattr(self.io, "close", None)
@@ -219,6 +264,8 @@ class ControlLoop(threading.Thread):
             self._last_target = desired
         if self.readonly:
             return readings
+        if desired != LEVEL_AUTO:
+            self._set_manual(True)        # announce first: the watchdog must know before the EC can be in manual
         out = []
         for r in readings:
             if r.level == desired:
@@ -231,6 +278,8 @@ class ControlLoop(threading.Thread):
             if got != desired:
                 raise ECError(f"fan {r.fan} read back 0x{got:02X} after writing 0x{desired:02X}")
             out.append(replace(r, level=got))
+        if desired == LEVEL_AUTO:
+            self._set_manual(False)       # every fan read back as auto
         return out
 
     def _check_stalls(self, decision: Decision, readings: list[FanReading]) -> tuple:
@@ -305,7 +354,7 @@ class ControlLoop(threading.Thread):
             self._paused = True
             self._pause_restored = self.readonly
         if not self._pause_restored:
-            self._pause_restored = self.fans.restore_auto()   # retried each cycle until verified
+            self._pause_restored = self._restore_auto()       # retried each cycle until verified
         self._publish(status=ST_PAUSED, raw={}, temps={}, fans=(), target=None, hottest=None,
                       cpu_level=0, gpu_level=0, stalled=(),
                       message=f"{', '.join(who)} is reading the EC - fans on EC auto until it closes"
@@ -322,6 +371,8 @@ class ControlLoop(threading.Thread):
         try:
             while not self._stop_evt.is_set():
                 self.heartbeat = time.monotonic()
+                self._beat()
+                self._check_watchdog()
                 if self.fans is None:
                     if not self._open():
                         self._stop_evt.wait(10)
@@ -342,7 +393,7 @@ class ControlLoop(threading.Thread):
                     self._last_target = "unset"
                     if self.ec_errors >= self.cfg["max_ec_errors"]:
                         if not self.readonly:
-                            self.fans.restore_auto()
+                            self._restore_auto()
                         self._publish(status=ST_FAULT,
                                       message=f"EC not responding ({self.ec_errors} errors) - "
                                               "fans handed to EC, retrying")
@@ -352,7 +403,7 @@ class ControlLoop(threading.Thread):
                 except Exception as e:      # programming error: fail safe, keep running
                     log.exception("Unexpected error in control loop")
                     if not self.readonly and self.fans:
-                        self.fans.restore_auto()
+                        self._restore_auto()
                     self._last_target = "unset"
                     self._publish(status=ST_FAULT, message=f"Internal error: {e}")
                 self._stop_evt.wait(self._cycle_s())
@@ -365,6 +416,8 @@ class ControlLoop(threading.Thread):
             return
         self.restored_on_exit = True
         if self.fans and not self.readonly:
-            ok = self.fans.restore_auto()
+            ok = self._restore_auto()
             log.info("Exit: fans handed back to EC auto (%s)", "verified" if ok else "NOT verified")
+        if self.lease and not self._manual:
+            self.lease.clear()            # clean exit: lets the watchdog stop too (not done if unverified)
         self._close_io()
