@@ -42,11 +42,11 @@ looks wrong.
 > level held); plugging back in brought the curve back within a cycle;
 > starting while unplugged came up in EC auto; picking a mode from the tray
 > while on battery kept the EC in control until the laptop was plugged in;
+> unticking the battery option on battery and clicking Apply brought the
+> curve back without a restart, and ticking it again handed the fans back
+> to EC auto (on the built exe);
 > the saved Fan curve choice was never changed. Not yet tested: the built
-> exe, and a reboot on battery through the scheduled task. Not confirmed:
-> unticking the battery option on battery to get the curve back without a
-> restart. It was reported as working, but the logs do not show the setting
-> being applied.
+> exe, and a reboot on battery through the scheduled task.
 >
 > **Not tested:** any other model or generation, single-fan ThinkPads, Windows
 > 10, hibernate, docking, uptimes of weeks, any BIOS other than the one used
